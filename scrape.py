@@ -3,6 +3,8 @@ import time
 import requests
 import concurrent.futures
 import random
+import csv
+from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -11,6 +13,11 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from webdriver_manager.chrome import ChromeDriverManager
+from urllib.parse import urlparse
+
+# Global list to store all metadata
+metadata_list = []
+metadata_lock = concurrent.futures.ThreadPoolExecutor()._shutdown
 
 def download_image(args):
     """Download an image from URL to the specified folder"""
@@ -47,13 +54,167 @@ def download_image(args):
             if attempt > 10:
                 return f"Error downloading {url}: {str(e)}"
 
+def extract_photo_metadata(driver, photo_url):
+    """Extract metadata from individual photo page"""
+    metadata = {
+        'title': 'Unknown',
+        'author': 'Unknown',
+        'upload_date': 'Unknown',
+        'tags': '',
+        'description': '',
+        'url': photo_url,
+        'photo_id': 'Unknown'
+    }
+    
+    try:
+        # Open the photo page in a new tab
+        original_window = driver.current_window_handle
+        driver.execute_script("window.open(arguments[0]);", photo_url)
+        driver.switch_to.window(driver.window_handles[-1])
+        time.sleep(3)
+        
+        try:
+            # Extract title
+            title_elem = driver.find_element(By.CSS_SELECTOR, "h1.title, span.photo-title, div.photo-title")
+            metadata['title'] = title_elem.text.strip()
+        except:
+            pass
+        
+        try:
+            # Extract author
+            author_elem = driver.find_element(By.CSS_SELECTOR, "a.owner-name, span.owner-name, div.owner")
+            metadata['author'] = author_elem.text.strip()
+        except:
+            pass
+        
+        try:
+            # Extract upload date
+            date_elem = driver.find_element(By.CSS_SELECTOR, "span.photo-date, time, abbr.published")
+            metadata['upload_date'] = date_elem.text.strip()
+        except:
+            pass
+        
+        try:
+            # Extract description
+            desc_elem = driver.find_element(By.CSS_SELECTOR, "div.description, p.description, div.photo-description")
+            metadata['description'] = desc_elem.text.strip()[:500]  # Limit to 500 chars
+        except:
+            pass
+        
+        try:
+            # Extract tags
+            tags = []
+            tag_elems = driver.find_elements(By.CSS_SELECTOR, "a.tag, span.tag")
+            for tag in tag_elems[:10]:  # Limit to first 10 tags
+                tags.append(tag.text.strip())
+            metadata['tags'] = ', '.join(tags)
+        except:
+            pass
+        
+        try:
+            # Extract photo ID from URL
+            if 'photos' in photo_url:
+                parts = photo_url.split('/')
+                for i, part in enumerate(parts):
+                    if part.isdigit() and len(part) > 5:
+                        metadata['photo_id'] = part
+                        break
+        except:
+            pass
+        
+        # Close the photo tab and return to original
+        driver.close()
+        driver.switch_to.window(original_window)
+        
+    except Exception as e:
+        print(f"Error extracting metadata: {str(e)}")
+        try:
+            driver.close()
+            driver.switch_to.window(original_window)
+        except:
+            pass
+    
+    return metadata
+
+def export_metadata_to_csv(metadata_list, output_folder):
+    """Export metadata to CSV file"""
+    csv_path = os.path.join(output_folder, 'flickr_metadata.csv')
+    
+    if not metadata_list:
+        print("No metadata to export")
+        return
+    
+    try:
+        with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+            fieldnames = ['Image #', 'Filename', 'Title', 'Author', 'Upload Date', 'Description', 'Tags', 'Photo URL', 'Photo ID']
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            
+            for i, data in enumerate(metadata_list, 1):
+                writer.writerow({
+                    'Image #': i,
+                    'Filename': data.get('filename', ''),
+                    'Title': data.get('title', ''),
+                    'Author': data.get('author', ''),
+                    'Upload Date': data.get('upload_date', ''),
+                    'Description': data.get('description', ''),
+                    'Tags': data.get('tags', ''),
+                    'Photo URL': data.get('url', ''),
+                    'Photo ID': data.get('photo_id', '')
+                })
+        
+        print(f"Metadata exported to {csv_path}")
+    except Exception as e:
+        print(f"Error exporting CSV: {str(e)}")
+
+def export_metadata_to_markdown(metadata_list, output_folder):
+    """Export metadata to Markdown file"""
+    md_path = os.path.join(output_folder, 'flickr_metadata.md')
+    
+    if not metadata_list:
+        print("No metadata to export")
+        return
+    
+    try:
+        with open(md_path, 'w', encoding='utf-8') as f:
+            f.write("# Flickr Album Metadata\n\n")
+            f.write(f"**Total Images:** {len(metadata_list)}\n")
+            f.write(f"**Export Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            f.write("---\n\n")
+            
+            for i, data in enumerate(metadata_list, 1):
+                f.write(f"## Image {i}\n\n")
+                f.write(f"**Filename:** {data.get('filename', 'Unknown')}\n\n")
+                f.write(f"**Title:** {data.get('title', 'Unknown')}\n\n")
+                f.write(f"**Author:** {data.get('author', 'Unknown')}\n\n")
+                f.write(f"**Upload Date:** {data.get('upload_date', 'Unknown')}\n\n")
+                f.write(f"**Photo ID:** {data.get('photo_id', 'Unknown')}\n\n")
+                
+                if data.get('description'):
+                    f.write(f"**Description:** {data.get('description')}\n\n")
+                
+                if data.get('tags'):
+                    f.write(f"**Tags:** {data.get('tags')}\n\n")
+                
+                f.write(f"**URL:** [{data.get('url', 'Link')}]({data.get('url', '')})\n\n")
+                f.write("---\n\n")
+        
+        print(f"Metadata exported to {md_path}")
+    except Exception as e:
+        print(f"Error exporting Markdown: {str(e)}")
+
 def scrape_flickr_album(album_url, output_folder="downloaded_images", max_workers=10):
     """Scrape all images from a Flickr album"""
+    global metadata_list
+    metadata_list = []
+    
     # Setup Chrome options
     chrome_options = Options()
-    chrome_options.add_argument("--headless")  # Run in headless mode
+    chrome_options.add_argument("--headless")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
     
     # Initialize the Chrome driver
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
@@ -78,13 +239,8 @@ def scrape_flickr_album(album_url, output_folder="downloaded_images", max_worker
                 # Scroll down to load all images on current page
                 last_height = driver.execute_script("return document.body.scrollHeight")
                 while True:
-                    # Scroll down
                     driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                    
-                    # Wait for new images to load
                     time.sleep(2)
-                    
-                    # Calculate new scroll height and compare with last scroll height
                     new_height = driver.execute_script("return document.body.scrollHeight")
                     if new_height == last_height:
                         break
@@ -93,41 +249,56 @@ def scrape_flickr_album(album_url, output_folder="downloaded_images", max_worker
                 
                 # Find all image elements on current page
                 images = driver.find_elements(By.CSS_SELECTOR, "div.photo img")
-                
                 print(f"Found {len(images)} images on page {page_num}")
                 
-                # Prepare download tasks
+                # Prepare download tasks and metadata extraction
                 download_tasks = []
+                photo_links = []
+                
                 for i, img in enumerate(images):
                     img_url = img.get_attribute("src")
                     
                     # Convert thumbnail URL to larger version if needed
                     img_url = img_url.replace("_c.jpg", "_b.jpg").replace("_z.jpg", "_b.jpg")
                     
-                    # Extract filename from URL or use index
                     filename = f"flickr_image_{image_count + i + 1}.jpg"
-                    
-                    # Add to download tasks
                     download_tasks.append((img_url, output_folder, filename))
+                    
+                    # Try to get photo link
+                    try:
+                        photo_link_elem = img.find_element(By.XPATH, "./ancestor::a")
+                        photo_link = photo_link_elem.get_attribute("href")
+                        if photo_link:
+                            photo_links.append({
+                                'url': photo_link,
+                                'filename': filename,
+                                'index': image_count + i + 1
+                            })
+                    except:
+                        pass
                 
-                # Submit all download tasks to the thread pool
+                # Submit all download tasks
                 futures = [executor.submit(download_image, task) for task in download_tasks]
-                
-                # Process results as they complete
                 for future in concurrent.futures.as_completed(futures):
                     print(future.result())
+                
+                # Extract metadata for each photo (slower but necessary)
+                print(f"Extracting metadata for {len(photo_links)} photos...")
+                for photo_info in photo_links:
+                    metadata = extract_photo_metadata(driver, photo_info['url'])
+                    metadata['filename'] = photo_info['filename']
+                    metadata_list.append(metadata)
+                    time.sleep(1)  # Be respectful with requests
                 
                 image_count += len(images)
                 
                 # Try to find and click the "Next" button
                 try:
-                    # Look for the next button using the correct selector
                     next_button = driver.find_element(By.CSS_SELECTOR, "i.page-arrow.right")
-                    
                     if next_button and next_button.is_displayed():
                         print("Clicking 'Next' button...")
                         next_button.click()
-                        time.sleep(5)  # Wait for the next page to load
+                        time.sleep(5)
                         page_num += 1
                     else:
                         print("Next button not visible. Reached the last page.")
@@ -136,14 +307,18 @@ def scrape_flickr_album(album_url, output_folder="downloaded_images", max_worker
                     print("No 'Next' button found. Reached the last page.")
                     has_next_page = False
         
-        print(f"All images downloaded to {output_folder} folder. Total: {image_count} images.")
+        # Export metadata after all downloads complete
+        print("\nExporting metadata...")
+        export_metadata_to_csv(metadata_list, output_folder)
+        export_metadata_to_markdown(metadata_list, output_folder)
+        
+        print(f"\nAll images downloaded to {output_folder} folder. Total: {image_count} images.")
+        print(f"Metadata saved to:\n  - flickr_metadata.csv\n  - flickr_metadata.md")
             
     finally:
-        # Close the browser
         driver.quit()
 
 if __name__ == "__main__":
-    # Replace with your Flickr album URL
     album_url = input("Enter the Flickr album URL: ")
     output_folder = input("Enter output folder name (default: downloaded_images): ") or "downloaded_images"
     max_workers = input("Enter maximum number of download threads (default: 10): ")
