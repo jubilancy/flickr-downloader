@@ -12,12 +12,11 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
-from webdriver_manager.chrome import ChromeDriverManager
 from urllib.parse import urlparse
+from webdriver_manager.chrome import ChromeDriverManager
 
 # Global list to store all metadata
 metadata_list = []
-metadata_lock = concurrent.futures.ThreadPoolExecutor()._shutdown
 
 def download_image(args):
     """Download an image from URL to the specified folder"""
@@ -71,7 +70,7 @@ def extract_photo_metadata(driver, photo_url):
         original_window = driver.current_window_handle
         driver.execute_script("window.open(arguments[0]);", photo_url)
         driver.switch_to.window(driver.window_handles[-1])
-        time.sleep(3)
+        time.sleep(2)
         
         try:
             # Extract title
@@ -97,7 +96,7 @@ def extract_photo_metadata(driver, photo_url):
         try:
             # Extract description
             desc_elem = driver.find_element(By.CSS_SELECTOR, "div.description, p.description, div.photo-description")
-            metadata['description'] = desc_elem.text.strip()[:500]  # Limit to 500 chars
+            metadata['description'] = desc_elem.text.strip()[:500]
         except:
             pass
         
@@ -105,7 +104,7 @@ def extract_photo_metadata(driver, photo_url):
             # Extract tags
             tags = []
             tag_elems = driver.find_elements(By.CSS_SELECTOR, "a.tag, span.tag")
-            for tag in tag_elems[:10]:  # Limit to first 10 tags
+            for tag in tag_elems[:10]:
                 tags.append(tag.text.strip())
             metadata['tags'] = ', '.join(tags)
         except:
@@ -163,7 +162,7 @@ def export_metadata_to_csv(metadata_list, output_folder):
                     'Photo ID': data.get('photo_id', '')
                 })
         
-        print(f"Metadata exported to {csv_path}")
+        print(f"✓ Metadata exported to {csv_path}")
     except Exception as e:
         print(f"Error exporting CSV: {str(e)}")
 
@@ -199,7 +198,7 @@ def export_metadata_to_markdown(metadata_list, output_folder):
                 f.write(f"**URL:** [{data.get('url', 'Link')}]({data.get('url', '')})\n\n")
                 f.write("---\n\n")
         
-        print(f"Metadata exported to {md_path}")
+        print(f"✓ Metadata exported to {md_path}")
     except Exception as e:
         print(f"Error exporting Markdown: {str(e)}")
 
@@ -208,20 +207,34 @@ def scrape_flickr_album(album_url, output_folder="downloaded_images", max_worker
     global metadata_list
     metadata_list = []
     
-    # Setup Chrome options
+    # Setup Chrome options for Chromium
     chrome_options = Options()
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-extensions")
     
     # Initialize the Chrome driver
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+    try:
+        print("Initializing ChromeDriver...")
+        driver = webdriver.Chrome(
+            service=Service(ChromeDriverManager().install()),
+            options=chrome_options
+        )
+    except Exception as e:
+        print(f"Error initializing Chrome: {str(e)}")
+        print("Trying alternative setup...")
+        try:
+            driver = webdriver.Chrome(options=chrome_options)
+        except Exception as e2:
+            print(f"Failed to initialize Chrome: {str(e2)}")
+            return
     
     try:
         # Navigate to the album URL
-        print(f"Navigating to {album_url}")
+        print(f"\nNavigating to {album_url}")
         driver.get(album_url)
         
         # Wait for the page to load
@@ -234,10 +247,11 @@ def scrape_flickr_album(album_url, output_folder="downloaded_images", max_worker
         # Create a thread pool executor
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             while has_next_page:
-                print(f"Processing page {page_num}...")
+                print(f"\n--- Processing page {page_num} ---")
                 
                 # Scroll down to load all images on current page
                 last_height = driver.execute_script("return document.body.scrollHeight")
+                scroll_count = 0
                 while True:
                     driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
                     time.sleep(2)
@@ -245,11 +259,13 @@ def scrape_flickr_album(album_url, output_folder="downloaded_images", max_worker
                     if new_height == last_height:
                         break
                     last_height = new_height
-                    print("Scrolling to load more images...")
+                    scroll_count += 1
+                    if scroll_count % 3 == 0:
+                        print(f"  Scrolling to load more images... (scroll #{scroll_count})")
                 
                 # Find all image elements on current page
                 images = driver.find_elements(By.CSS_SELECTOR, "div.photo img")
-                print(f"Found {len(images)} images on page {page_num}")
+                print(f"  Found {len(images)} images on page {page_num}")
                 
                 # Prepare download tasks and metadata extraction
                 download_tasks = []
@@ -278,17 +294,24 @@ def scrape_flickr_album(album_url, output_folder="downloaded_images", max_worker
                         pass
                 
                 # Submit all download tasks
+                print(f"  Starting downloads with {max_workers} threads...")
                 futures = [executor.submit(download_image, task) for task in download_tasks]
+                download_count = 0
                 for future in concurrent.futures.as_completed(futures):
-                    print(future.result())
+                    download_count += 1
+                    if download_count % 10 == 0:
+                        print(f"    {download_count}/{len(futures)} downloads completed")
                 
-                # Extract metadata for each photo (slower but necessary)
-                print(f"Extracting metadata for {len(photo_links)} photos...")
-                for photo_info in photo_links:
+                print(f"  All {len(download_tasks)} images downloaded")
+                
+                # Extract metadata for each photo
+                print(f"  Extracting metadata for {len(photo_links)} photos...")
+                for idx, photo_info in enumerate(photo_links, 1):
+                    print(f"    [{idx}/{len(photo_links)}] Extracting metadata...")
                     metadata = extract_photo_metadata(driver, photo_info['url'])
                     metadata['filename'] = photo_info['filename']
                     metadata_list.append(metadata)
-                    time.sleep(1)  # Be respectful with requests
+                    time.sleep(1)
                 
                 image_count += len(images)
                 
@@ -296,32 +319,52 @@ def scrape_flickr_album(album_url, output_folder="downloaded_images", max_worker
                 try:
                     next_button = driver.find_element(By.CSS_SELECTOR, "i.page-arrow.right")
                     if next_button and next_button.is_displayed():
-                        print("Clicking 'Next' button...")
+                        print(f"  Clicking 'Next' button to page {page_num + 1}...")
                         next_button.click()
                         time.sleep(5)
                         page_num += 1
                     else:
-                        print("Next button not visible. Reached the last page.")
+                        print("  ✓ Reached the last page")
                         has_next_page = False
                 except NoSuchElementException:
-                    print("No 'Next' button found. Reached the last page.")
+                    print("  ✓ Reached the last page (no next button found)")
                     has_next_page = False
         
         # Export metadata after all downloads complete
-        print("\nExporting metadata...")
+        print("\n--- Exporting Metadata ---")
         export_metadata_to_csv(metadata_list, output_folder)
         export_metadata_to_markdown(metadata_list, output_folder)
         
-        print(f"\nAll images downloaded to {output_folder} folder. Total: {image_count} images.")
-        print(f"Metadata saved to:\n  - flickr_metadata.csv\n  - flickr_metadata.md")
+        print(f"\n{'='*50}")
+        print(f"✓ COMPLETE!")
+        print(f"{'='*50}")
+        print(f"Total images downloaded: {image_count}")
+        print(f"Location: {os.path.abspath(output_folder)}")
+        print(f"Files created:")
+        print(f"  - {image_count} image files")
+        print(f"  - flickr_metadata.csv")
+        print(f"  - flickr_metadata.md")
+        print(f"{'='*50}\n")
             
+    except Exception as e:
+        print(f"Error during scraping: {str(e)}")
     finally:
         driver.quit()
 
 if __name__ == "__main__":
-    album_url = input("Enter the Flickr album URL: ")
-    output_folder = input("Enter output folder name (default: downloaded_images): ") or "downloaded_images"
-    max_workers = input("Enter maximum number of download threads (default: 10): ")
-    max_workers = int(max_workers) if max_workers.isdigit() else 10
+    print("\n" + "="*50)
+    print("FLICKR ALBUM SCRAPER")
+    print("="*50)
+    
+    album_url = input("\nEnter the Flickr album URL: ").strip()
+    output_folder = input("Enter output folder name (default: downloaded_images): ").strip() or "downloaded_images"
+    max_workers_input = input("Enter maximum number of download threads (default: 15): ").strip()
+    max_workers = int(max_workers_input) if max_workers_input.isdigit() else 15
+    
+    print(f"\nSettings:")
+    print(f"  URL: {album_url}")
+    print(f"  Output folder: {output_folder}")
+    print(f"  Download threads: {max_workers}")
+    print(f"\nStarting scraper...\n")
     
     scrape_flickr_album(album_url, output_folder, max_workers)
